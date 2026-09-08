@@ -230,6 +230,23 @@ class TestW3cTraceparentExtraction:
         assert root.parent is not None
         assert root.parent.span_id == expected_parent_span_id
 
+    def test_extract_context_returns_none_without_traceparent(
+        self, tracer: EvalTracer
+    ) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            assert tracer.extract_context() is None
+
+    def test_root_span_has_no_remote_parent_without_traceparent(
+        self, exporter: InMemorySpanExporter, tracer: EvalTracer
+    ) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with tracer.evaluation_run():
+                pass
+
+        spans = exporter.get_finished_spans()
+        root = next(s for s in spans if s.name == "evalhub.evaluation.run")
+        assert root.parent is None
+
 
 @pytest.mark.no_otel_provider
 class TestNoOtelConfiguredNoop:
