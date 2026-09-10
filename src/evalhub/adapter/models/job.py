@@ -19,6 +19,7 @@ from ...models.api import (
     MetricSchema,
     ModelConfig,
     OCICoordinates,
+    PrimaryScore,
 )
 from .cards import EnvironmentCardMetadata, EvalCardMetadata
 
@@ -80,6 +81,7 @@ class JobSpec(BaseModel):
         - num_examples: Number of examples to evaluate (None = all)
         - experiment_name: Name for this evaluation experiment
         - tags: Custom tags for the job
+        - primary_score: Primary score config (metric name + direction)
         - exports: Mechanism to provide exports callbacks
     """
 
@@ -123,6 +125,12 @@ class JobSpec(BaseModel):
     )
     tags: list[dict[str, str]] = Field(
         default_factory=list, description="Custom tags for the job"
+    )
+
+    # Primary score configuration (resolved from benchmark config or provider definition)
+    primary_score: PrimaryScore | None = Field(
+        default=None,
+        description="Primary score configuration resolved from benchmark or provider",
     )
 
     # Job exports
