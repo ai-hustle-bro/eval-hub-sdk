@@ -9,7 +9,7 @@ from typing import Any
 
 from evalhub.adapter.models.adapter import FrameworkAdapter
 
-from ..models.api import JobStatus, MessageOrigin
+from ..models.api import EvaluationResult, JobStatus, MessageOrigin, PrimaryScore
 from .config import EvalHubMode, MlflowBackend
 from .mlflow import MlflowArtifact
 from .models import (
@@ -347,6 +347,7 @@ class DefaultCallbacks(JobCallbacks):
             Callable[[JobResults], dict[str, Any] | None] | None
         ) = None,
         tracer: EvalTracer | None = None,
+        primary_score: PrimaryScore | None = None,
     ):
         """Initialize default callbacks.
 
@@ -379,6 +380,9 @@ class DefaultCallbacks(JobCallbacks):
                            evaluation key-value pairs from JobResults. Called by
                            report_results() when results.additional_info is not
                            already set. Automatically wired via from_adapter().
+            primary_score: Primary score configuration from the job spec. When set and
+                          results.overall_score is None, report_results() auto-resolves
+                          overall_score from the matching metric in results.results.
         """
         self.job_id = job_id
         self.benchmark_id = benchmark_id
@@ -422,6 +426,7 @@ class DefaultCallbacks(JobCallbacks):
         self.mlflow = _MlflowOps(backend=mlflow_backend, callbacks=self)
 
         self.generate_additional_info_fn = generate_additional_info_fn
+        self.primary_score = primary_score
 
         self.tracer: EvalTracer = tracer if tracer is not None else EvalTracer()
 
@@ -710,6 +715,15 @@ class DefaultCallbacks(JobCallbacks):
             except Exception:
                 logger.debug("generate_additional_info_fn failed", exc_info=True)
 
+        # Resolve overall_score from primary_score when the adapter did not set one.
+        # Unlike additional_info / env_card we DO write back so that downstream
+        # consumers (MLflow, logging) also see the resolved value.
+        if results.overall_score is None and self.primary_score:
+            resolved = self._resolve_overall_score(results.results, self.primary_score)
+            if resolved is not None:
+                results.overall_score = resolved
+        overall_score = results.overall_score
+
         # Resolve the Environment Card without mutating the caller's results object.
         # If the provider did not supply one, capture a best-effort card locally.
         env_card = results.env_card
@@ -736,6 +750,9 @@ class DefaultCallbacks(JobCallbacks):
                 status_event = self._build_base_status_event(JobStatus.COMPLETED.value)
                 status_event["metrics"] = metrics
                 status_event["completed_at"] = results.completed_at.isoformat()
+
+                if overall_score is not None:
+                    status_event["overall_score"] = overall_score
 
                 if results.metrics_schema:
                     status_event["metrics_schema"] = [
@@ -786,7 +803,7 @@ class DefaultCallbacks(JobCallbacks):
                 logger.info(
                     f"Results reported to evalhub | "
                     f"Metrics: {len(metrics)} | "
-                    f"Score: {results.overall_score}"
+                    f"Score: {overall_score}"
                 )
 
             except self.httpx.HTTPStatusError as e:
@@ -805,10 +822,25 @@ class DefaultCallbacks(JobCallbacks):
             f"Job {results.id} completed | "
             f"Benchmark: {results.benchmark_id} | "
             f"Model: {results.model_name} | "
-            f"Score: {results.overall_score} | "
+            f"Score: {overall_score} | "
             f"Examples: {results.num_examples_evaluated} | "
             f"Duration: {results.duration_seconds:.2f}s"
         )
+
+    @staticmethod
+    def _resolve_overall_score(
+        results: list[EvaluationResult],
+        primary_score: PrimaryScore,
+    ) -> float | None:
+        """Look up the primary score metric in results and return its value."""
+        for r in results:
+            if r.metric_name == primary_score.metric:
+                if isinstance(r.metric_value, bool):
+                    return None
+                if isinstance(r.metric_value, int | float):
+                    return float(r.metric_value)
+                return None
+        return None
 
     @staticmethod
     def from_adapter(adapter: FrameworkAdapter) -> DefaultCallbacks:
@@ -835,4 +867,5 @@ class DefaultCallbacks(JobCallbacks):
                 else None
             ),
             tracer=EvalTracer.from_job_spec(adapter.job_spec),
+            primary_score=adapter.job_spec.primary_score,
         )

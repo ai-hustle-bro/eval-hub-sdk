@@ -25,7 +25,7 @@ from evalhub.adapter import (
     OCIArtifactSpec,
     SafetyEvalEntry,
 )
-from evalhub.models import MetricSchema, ResultType
+from evalhub.models import MetricSchema, PrimaryScore, ResultType
 from pydantic import ValidationError
 
 pytestmark = pytest.mark.unit
@@ -194,6 +194,103 @@ class TestJobSpec:
         # Can recreate from JSON
         spec_2 = JobSpec(**json_data)
         assert spec_2.id == spec.id
+
+    def test_jobspec_with_primary_score(self) -> None:
+        """Test JobSpec with primary_score field."""
+        ps = PrimaryScore(metric="output_tokens_per_second", lower_is_better=False)
+        spec = JobSpec(
+            id="test-job-ps",
+            provider_id="guidellm",
+            benchmark_id="constant",
+            benchmark_index=0,
+            model=ModelConfig(url="http://localhost:8000", name="model"),
+            parameters={},
+            callback_url="http://localhost:8080",
+            primary_score=ps,
+        )
+
+        assert spec.primary_score is not None
+        assert spec.primary_score.metric == "output_tokens_per_second"
+        assert spec.primary_score.lower_is_better is False
+
+    def test_jobspec_primary_score_defaults_to_none(self) -> None:
+        """Test that primary_score defaults to None when not provided."""
+        spec = JobSpec(
+            id="test-job-nops",
+            provider_id="lm_evaluation_harness",
+            benchmark_id="mmlu",
+            benchmark_index=0,
+            model=ModelConfig(url="http://localhost:8000", name="model"),
+            parameters={},
+            callback_url="http://localhost:8080",
+        )
+
+        assert spec.primary_score is None
+
+    def test_jobspec_from_file_with_primary_score(self, tmp_path: Path) -> None:
+        """Test loading JobSpec from JSON that includes primary_score."""
+        job_spec = {
+            "id": "test-job-ps-file",
+            "provider_id": "guidellm",
+            "benchmark_id": "constant",
+            "benchmark_index": 0,
+            "model": {"url": "http://localhost:8000", "name": "test-model"},
+            "parameters": {},
+            "callback_url": "http://localhost:8080",
+            "primary_score": {
+                "metric": "output_tokens_per_second",
+                "lower_is_better": False,
+            },
+        }
+
+        spec_file = tmp_path / "job.json"
+        spec_file.write_text(json.dumps(job_spec))
+
+        spec = JobSpec.from_file(spec_file)
+
+        assert spec.primary_score is not None
+        assert spec.primary_score.metric == "output_tokens_per_second"
+        assert spec.primary_score.lower_is_better is False
+
+    def test_jobspec_from_file_without_primary_score(self, tmp_path: Path) -> None:
+        """Test loading JobSpec from JSON without primary_score (backward compat)."""
+        job_spec = {
+            "id": "test-job-no-ps",
+            "provider_id": "lm_evaluation_harness",
+            "benchmark_id": "mmlu",
+            "benchmark_index": 0,
+            "model": {"url": "http://localhost:8000", "name": "model"},
+            "parameters": {},
+            "callback_url": "http://localhost:8080",
+        }
+
+        spec_file = tmp_path / "job.json"
+        spec_file.write_text(json.dumps(job_spec))
+
+        spec = JobSpec.from_file(spec_file)
+
+        assert spec.primary_score is None
+
+    def test_jobspec_primary_score_roundtrip(self) -> None:
+        """Test that primary_score survives model_dump → reconstruction."""
+        ps = PrimaryScore(metric="mean_ttft_ms", lower_is_better=True)
+        spec = JobSpec(
+            id="test-rt",
+            provider_id="guidellm",
+            benchmark_id="constant",
+            benchmark_index=0,
+            model=ModelConfig(url="http://localhost:8000", name="model"),
+            parameters={},
+            callback_url="http://localhost:8080",
+            primary_score=ps,
+        )
+
+        data = spec.model_dump()
+        spec2 = JobSpec(**data)
+
+        assert spec2.primary_score is not None
+        assert spec2.primary_score.metric == "mean_ttft_ms"
+        assert spec2.primary_score.lower_is_better is True
 
 
 class TestJobStatusUpdate:
