@@ -554,14 +554,37 @@ def test_resolve_overall_score_ignores_non_numeric_metric() -> None:
     assert DefaultCallbacks._resolve_overall_score(results, ps) is None
 
 
+def test_resolve_overall_score_ignores_bool_true() -> None:
+    """_resolve_overall_score returns None for True (bool is subclass of int)."""
+    ps = PrimaryScore(metric="passed", lower_is_better=False)
+    results = [
+        EvaluationResult(metric_name="passed", metric_value=True, metric_type="bool"),
+    ]
+    assert DefaultCallbacks._resolve_overall_score(results, ps) is None
+
+
+def test_resolve_overall_score_ignores_bool_false() -> None:
+    """_resolve_overall_score returns None for False (bool is subclass of int)."""
+    ps = PrimaryScore(metric="passed", lower_is_better=False)
+    results = [
+        EvaluationResult(metric_name="passed", metric_value=False, metric_type="bool"),
+    ]
+    assert DefaultCallbacks._resolve_overall_score(results, ps) is None
+
+
 def test_report_results_uses_primary_score_when_overall_score_not_set() -> None:
-    """report_results auto-resolves overall_score from primary_score."""
+    """report_results auto-resolves overall_score from primary_score and includes it in the payload."""
     ps = PrimaryScore(metric="output_tokens_per_second", lower_is_better=False)
     callbacks, mock_http = _make_callbacks_with_primary_score(primary_score=ps)
 
-    callbacks.report_results(_guidellm_results(overall_score=None))
+    results = _guidellm_results(overall_score=None)
+    callbacks.report_results(results)
 
     mock_http.post.assert_called_once()
+    body = mock_http.post.call_args.kwargs["json"]
+    event = body["benchmark_status_event"]
+    assert event["overall_score"] == 41.38
+    assert results.overall_score == 41.38
 
 
 def test_report_results_preserves_explicit_overall_score() -> None:

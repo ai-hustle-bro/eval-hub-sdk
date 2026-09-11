@@ -716,11 +716,13 @@ class DefaultCallbacks(JobCallbacks):
                 logger.debug("generate_additional_info_fn failed", exc_info=True)
 
         # Resolve overall_score from primary_score when the adapter did not set one.
+        # Unlike additional_info / env_card we DO write back so that downstream
+        # consumers (MLflow, logging) also see the resolved value.
+        if results.overall_score is None and self.primary_score:
+            resolved = self._resolve_overall_score(results.results, self.primary_score)
+            if resolved is not None:
+                results.overall_score = resolved
         overall_score = results.overall_score
-        if overall_score is None and self.primary_score:
-            overall_score = self._resolve_overall_score(
-                results.results, self.primary_score
-            )
 
         # Resolve the Environment Card without mutating the caller's results object.
         # If the provider did not supply one, capture a best-effort card locally.
@@ -748,6 +750,9 @@ class DefaultCallbacks(JobCallbacks):
                 status_event = self._build_base_status_event(JobStatus.COMPLETED.value)
                 status_event["metrics"] = metrics
                 status_event["completed_at"] = results.completed_at.isoformat()
+
+                if overall_score is not None:
+                    status_event["overall_score"] = overall_score
 
                 if results.metrics_schema:
                     status_event["metrics_schema"] = [
@@ -830,6 +835,8 @@ class DefaultCallbacks(JobCallbacks):
         """Look up the primary score metric in results and return its value."""
         for r in results:
             if r.metric_name == primary_score.metric:
+                if isinstance(r.metric_value, bool):
+                    return None
                 if isinstance(r.metric_value, int | float):
                     return float(r.metric_value)
                 return None
