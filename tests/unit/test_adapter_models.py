@@ -3,6 +3,7 @@
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from evalhub.adapter import (
@@ -24,6 +25,10 @@ from evalhub.adapter import (
     OCIArtifactSpec,
     SafetyEvalEntry,
 )
+from evalhub.models import MetricSchema, PrimaryScore, ResultType
+from pydantic import ValidationError
+
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
@@ -189,6 +194,103 @@ class TestJobSpec:
         # Can recreate from JSON
         spec_2 = JobSpec(**json_data)
         assert spec_2.id == spec.id
+
+    def test_jobspec_with_primary_score(self) -> None:
+        """Test JobSpec with primary_score field."""
+        ps = PrimaryScore(metric="output_tokens_per_second", lower_is_better=False)
+        spec = JobSpec(
+            id="test-job-ps",
+            provider_id="guidellm",
+            benchmark_id="constant",
+            benchmark_index=0,
+            model=ModelConfig(url="http://localhost:8000", name="model"),
+            parameters={},
+            callback_url="http://localhost:8080",
+            primary_score=ps,
+        )
+
+        assert spec.primary_score is not None
+        assert spec.primary_score.metric == "output_tokens_per_second"
+        assert spec.primary_score.lower_is_better is False
+
+    def test_jobspec_primary_score_defaults_to_none(self) -> None:
+        """Test that primary_score defaults to None when not provided."""
+        spec = JobSpec(
+            id="test-job-nops",
+            provider_id="lm_evaluation_harness",
+            benchmark_id="mmlu",
+            benchmark_index=0,
+            model=ModelConfig(url="http://localhost:8000", name="model"),
+            parameters={},
+            callback_url="http://localhost:8080",
+        )
+
+        assert spec.primary_score is None
+
+    def test_jobspec_from_file_with_primary_score(self, tmp_path: Path) -> None:
+        """Test loading JobSpec from JSON that includes primary_score."""
+        job_spec = {
+            "id": "test-job-ps-file",
+            "provider_id": "guidellm",
+            "benchmark_id": "constant",
+            "benchmark_index": 0,
+            "model": {"url": "http://localhost:8000", "name": "test-model"},
+            "parameters": {},
+            "callback_url": "http://localhost:8080",
+            "primary_score": {
+                "metric": "output_tokens_per_second",
+                "lower_is_better": False,
+            },
+        }
+
+        spec_file = tmp_path / "job.json"
+        spec_file.write_text(json.dumps(job_spec))
+
+        spec = JobSpec.from_file(spec_file)
+
+        assert spec.primary_score is not None
+        assert spec.primary_score.metric == "output_tokens_per_second"
+        assert spec.primary_score.lower_is_better is False
+
+    def test_jobspec_from_file_without_primary_score(self, tmp_path: Path) -> None:
+        """Test loading JobSpec from JSON without primary_score (backward compat)."""
+        job_spec = {
+            "id": "test-job-no-ps",
+            "provider_id": "lm_evaluation_harness",
+            "benchmark_id": "mmlu",
+            "benchmark_index": 0,
+            "model": {"url": "http://localhost:8000", "name": "model"},
+            "parameters": {},
+            "callback_url": "http://localhost:8080",
+        }
+
+        spec_file = tmp_path / "job.json"
+        spec_file.write_text(json.dumps(job_spec))
+
+        spec = JobSpec.from_file(spec_file)
+
+        assert spec.primary_score is None
+
+    def test_jobspec_primary_score_roundtrip(self) -> None:
+        """Test that primary_score survives model_dump → reconstruction."""
+        ps = PrimaryScore(metric="mean_ttft_ms", lower_is_better=True)
+        spec = JobSpec(
+            id="test-rt",
+            provider_id="guidellm",
+            benchmark_id="constant",
+            benchmark_index=0,
+            model=ModelConfig(url="http://localhost:8000", name="model"),
+            parameters={},
+            callback_url="http://localhost:8080",
+            primary_score=ps,
+        )
+
+        data = spec.model_dump()
+        spec2 = JobSpec(**data)
+
+        assert spec2.primary_score is not None
+        assert spec2.primary_score.metric == "mean_ttft_ms"
+        assert spec2.primary_score.lower_is_better is True
 
 
 class TestJobStatusUpdate:
@@ -530,6 +632,21 @@ class TestJobResults:
 
         assert results.completed_at is not None
         assert isinstance(results.completed_at, datetime)
+
+    def test_additional_info_accepts_nested_values_on_assignment(self) -> None:
+        """Test that assigning nested values to additional_info is accepted."""
+        results = JobResults(
+            id="test-job-001",
+            benchmark_id="mmlu",
+            benchmark_index=0,
+            model_name="model",
+            results=[],
+            num_examples_evaluated=100,
+            duration_seconds=60.0,
+        )
+
+        results.additional_info = {"nested": {"is": "allowed"}}
+        assert results.additional_info == {"nested": {"is": "allowed"}}
 
 
 class TestJobCallbacks:
@@ -1013,3 +1130,96 @@ class TestJobResultsWithCards:
 
         assert results.eval_card is None
         assert results.env_card is None
+        assert results.additional_info is None
+
+    def test_additional_info_accepts_scalar_values(self) -> None:
+        info: dict[str, Any] = {
+            "dataset_sha": "sha256:abc",
+            "zero_shot": "0.85",
+            "custom_metric": 42,
+            "score": 0.95,
+            "passed": True,
+            "notes": None,
+        }
+        results = JobResults(
+            id="j",
+            benchmark_id="b",
+            benchmark_index=0,
+            model_name="m",
+            results=[],
+            num_examples_evaluated=0,
+            duration_seconds=0.0,
+            additional_info=info,
+        )
+        assert results.additional_info == info
+
+    def test_additional_info_accepts_nested_values(self) -> None:
+        info: dict[str, Any] = {
+            "nested": {"a": 1, "b": [2, 3]},
+            "tags": ["a", "b"],
+            "scalar": "still works",
+        }
+        results = JobResults(
+            id="j",
+            benchmark_id="b",
+            benchmark_index=0,
+            model_name="m",
+            results=[],
+            num_examples_evaluated=0,
+            duration_seconds=0.0,
+            additional_info=info,
+        )
+        assert results.additional_info == info
+
+
+@pytest.mark.adapter
+class TestJobResultsMetricsSchemaValidation:
+    """Tests for metrics_schema name validation against results."""
+
+    def _base_results(self, **kwargs: Any) -> JobResults:
+        return JobResults(
+            id="j",
+            benchmark_id="b",
+            benchmark_index=0,
+            model_name="m",
+            results=[
+                EvaluationResult(metric_name="accuracy", metric_value=0.85),
+                EvaluationResult(metric_name="f1", metric_value=0.82),
+            ],
+            num_examples_evaluated=10,
+            duration_seconds=1.0,
+            **kwargs,
+        )
+
+    def test_valid_schema_names_accepted(self) -> None:
+        r = self._base_results(
+            metrics_schema=[
+                MetricSchema(name="accuracy", type=ResultType.NUMERIC),
+                MetricSchema(name="f1", type=ResultType.NUMERIC),
+            ]
+        )
+        assert r.metrics_schema is not None
+        assert len(r.metrics_schema) == 2
+
+    def test_schema_name_absent_from_results_raises(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match="metrics_schema contains names not present in results",
+        ):
+            self._base_results(
+                metrics_schema=[
+                    MetricSchema(name="accuracy", type=ResultType.NUMERIC),
+                    MetricSchema(name="typo_metric", type=ResultType.NUMERIC),
+                ]
+            )
+
+    def test_none_schema_always_valid(self) -> None:
+        r = self._base_results(metrics_schema=None)
+        assert r.metrics_schema is None
+
+    def test_partial_schema_valid_when_names_match(self) -> None:
+        r = self._base_results(
+            metrics_schema=[MetricSchema(name="accuracy", type=ResultType.NUMERIC)]
+        )
+        assert r.metrics_schema is not None
+        assert r.metrics_schema[0].name == "accuracy"

@@ -12,7 +12,16 @@ import pytest
 import yaml
 from click.testing import CliRunner
 from evalhub.cli.main import main
-from evalhub.models.api import Benchmark, PassCriteria, PrimaryScore, Provider, Resource
+from evalhub.models.api import (
+    AgentMetadata,
+    Benchmark,
+    PassCriteria,
+    PrimaryScore,
+    Provider,
+    Resource,
+)
+
+pytestmark = pytest.mark.unit
 
 
 def _make_provider(
@@ -20,12 +29,14 @@ def _make_provider(
     name: str = "LM Evaluation Harness",
     description: str = "Language model evaluation framework",
     benchmarks: list | None = None,
+    agent: AgentMetadata | None = None,
 ) -> Provider:
     return Provider(
         resource=Resource(id=id),
         name=name,
         description=description,
         benchmarks=benchmarks or [],
+        agent=agent,
     )
 
 
@@ -103,7 +114,8 @@ class TestProvidersList:
         assert result.exit_code == 0
         parsed = json.loads(result.output)
         assert len(parsed) == 1
-        assert parsed[0]["id"] == "lm_eval"
+        assert parsed[0]["resource"]["id"] == "lm_eval"
+        assert "agent" in parsed[0]
 
     def test_list_yaml_format(
         self, runner: CliRunner, config_file: Path, mock_client: MagicMock
@@ -115,7 +127,31 @@ class TestProvidersList:
             result = runner.invoke(main, ["providers", "list", "--format", "yaml"])
         assert result.exit_code == 0
         parsed = yaml.safe_load(result.output)
-        assert parsed[0]["id"] == "garak"
+        assert parsed[0]["resource"]["id"] == "garak"
+        assert "agent" in parsed[0]
+
+    def test_list_json_includes_agent_metadata(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        agent = AgentMetadata(
+            evaluates=["reasoning", "knowledge"],
+            recommended_when=["general LLM evaluation"],
+            target_type="llm",
+            summary="Broad benchmark suite",
+            complements=["garak"],
+            hints=["use with mmlu for knowledge tasks"],
+            result_interpretation=["higher is better"],
+        )
+        mock_client.providers.list.return_value = [
+            _make_provider(id="lm_eval", name="LM Eval", agent=agent),
+        ]
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(main, ["providers", "list", "--format", "json"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed[0]["agent"]["target_type"] == "llm"
+        assert parsed[0]["agent"]["summary"] == "Broad benchmark suite"
+        assert parsed[0]["agent"]["evaluates"] == ["reasoning", "knowledge"]
 
     def test_list_csv_format(
         self, runner: CliRunner, config_file: Path, mock_client: MagicMock
@@ -387,6 +423,240 @@ class TestProvidersCreate:
         mock_client.providers.create.assert_not_called()
 
 
+class TestProvidersUpdate:
+    def test_update_from_yaml(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        spec = {
+            "name": "updated-provider",
+            "title": "Updated Provider",
+            "description": "Updated via CLI",
+            "tags": ["updated"],
+            "benchmarks": [
+                {
+                    "id": "my-benchmark",
+                    "name": "My Benchmark",
+                    "description": "A benchmark",
+                    "category": "general",
+                    "metrics": ["accuracy"],
+                }
+            ],
+        }
+        spec_file = tmp_path / "provider.yaml"
+        spec_file.write_text(yaml.dump(spec))
+
+        updated = _make_provider(id="my-provider", name="Updated Provider")
+        mock_client.providers.update.return_value = updated
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                ["providers", "update", "my-provider", "--file", str(spec_file)],
+            )
+        assert result.exit_code == 0
+        assert "updated" in result.output.lower()
+        mock_client.providers.update.assert_called_once()
+        call_args = mock_client.providers.update.call_args
+        assert call_args[0][0] == "my-provider"
+
+    def test_update_from_json(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        spec = {
+            "name": "json-provider",
+            "title": "JSON Provider",
+            "benchmarks": [],
+        }
+        spec_file = tmp_path / "provider.json"
+        spec_file.write_text(json.dumps(spec))
+
+        updated = _make_provider(id="my-provider", name="JSON Provider")
+        mock_client.providers.update.return_value = updated
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                ["providers", "update", "my-provider", "--file", str(spec_file)],
+            )
+        assert result.exit_code == 0
+        assert "my-provider" in result.output
+
+    def test_update_json_output(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        spec = {"name": "my-provider", "title": "MyProvider", "benchmarks": []}
+        spec_file = tmp_path / "provider.yaml"
+        spec_file.write_text(yaml.dump(spec))
+
+        updated = _make_provider(id="my-provider", name="MyProvider")
+        mock_client.providers.update.return_value = updated
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "providers",
+                    "update",
+                    "my-provider",
+                    "--file",
+                    str(spec_file),
+                    "--format",
+                    "json",
+                ],
+            )
+        assert result.exit_code == 0
+        json_start = result.output.index("[")
+        parsed = json.loads(result.output[json_start:])
+        assert parsed[0]["name"] == "MyProvider"
+
+    def test_update_missing_file(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "providers",
+                    "update",
+                    "my-provider",
+                    "--file",
+                    "/nonexistent/path.yaml",
+                ],
+            )
+        assert result.exit_code != 0
+        mock_client.providers.update.assert_not_called()
+
+    def test_update_invalid_spec(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        spec: dict = {"description": "Missing required fields", "benchmarks": []}
+        spec_file = tmp_path / "bad.yaml"
+        spec_file.write_text(yaml.dump(spec))
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                ["providers", "update", "my-provider", "--file", str(spec_file)],
+            )
+        assert result.exit_code != 0
+        mock_client.providers.update.assert_not_called()
+
+
+class TestProvidersPatch:
+    def test_patch_from_yaml(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        spec = {"description": "Patched description"}
+        spec_file = tmp_path / "patch.yaml"
+        spec_file.write_text(yaml.dump(spec))
+
+        patched = _make_provider(id="my-provider", description="Patched description")
+        mock_client.providers.patch.return_value = patched
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                ["providers", "patch", "my-provider", "--file", str(spec_file)],
+            )
+        assert result.exit_code == 0
+        assert "patched" in result.output.lower()
+        mock_client.providers.patch.assert_called_once()
+        call_args = mock_client.providers.patch.call_args
+        assert call_args[0][0] == "my-provider"
+        assert call_args[0][1] == {"description": "Patched description"}
+
+    def test_patch_from_json(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        spec = {"tags": ["updated"]}
+        spec_file = tmp_path / "patch.json"
+        spec_file.write_text(json.dumps(spec))
+
+        patched = _make_provider(id="my-provider")
+        mock_client.providers.patch.return_value = patched
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                ["providers", "patch", "my-provider", "--file", str(spec_file)],
+            )
+        assert result.exit_code == 0
+        assert "my-provider" in result.output
+
+    def test_patch_json_output(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        spec = {"title": "Patched Title"}
+        spec_file = tmp_path / "patch.yaml"
+        spec_file.write_text(yaml.dump(spec))
+
+        patched = _make_provider(id="my-provider", name="MyProvider")
+        mock_client.providers.patch.return_value = patched
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "providers",
+                    "patch",
+                    "my-provider",
+                    "--file",
+                    str(spec_file),
+                    "--format",
+                    "json",
+                ],
+            )
+        assert result.exit_code == 0
+        json_start = result.output.index("[")
+        parsed = json.loads(result.output[json_start:])
+        assert parsed[0]["name"] == "MyProvider"
+
+    def test_patch_missing_file(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "providers",
+                    "patch",
+                    "my-provider",
+                    "--file",
+                    "/nonexistent/path.yaml",
+                ],
+            )
+        assert result.exit_code != 0
+        mock_client.providers.patch.assert_not_called()
+
+
 class TestProvidersDelete:
     def test_delete_confirmed(
         self, runner: CliRunner, config_file: Path, mock_client: MagicMock
@@ -426,6 +696,8 @@ class TestProvidersHelp:
         assert "list" in result.output
         assert "describe" in result.output
         assert "create" in result.output
+        assert "update" in result.output
+        assert "patch" in result.output
         assert "delete" in result.output
 
     def test_providers_list_help(self, runner: CliRunner) -> None:

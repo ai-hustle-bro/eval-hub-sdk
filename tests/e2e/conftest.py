@@ -8,11 +8,23 @@ import tempfile
 import time
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 
 logger = logging.getLogger(__name__)
+
+
+def pytest_configure(config: Any) -> None:
+    """Configure logging for E2E tests."""
+    if config.getoption("--e2e-debug", default=False):
+        e2e_logger = logging.getLogger("tests.e2e.conftest")
+        e2e_logger.setLevel(logging.DEBUG)
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(logging.Formatter("%(name)s %(levelname)s: %(message)s"))
+        e2e_logger.addHandler(handler)
 
 
 def _kill_process_on_port(port: int) -> bool:
@@ -49,16 +61,6 @@ def _kill_process_on_port(port: int) -> bool:
     return False
 
 
-def _ensure_server_binary() -> bool:
-    try:
-        from evalhub_server import get_binary_path
-
-        binary_path = get_binary_path()
-        return Path(binary_path).exists()
-    except Exception:
-        return False
-
-
 @pytest.fixture
 def evalhub_server_with_real_config() -> Generator[str, None, None]:
     """
@@ -74,11 +76,13 @@ def evalhub_server_with_real_config() -> Generator[str, None, None]:
         pytest.skip: If server binary or config directory is not available
     """
     # Ensure binary is available
-    if not _ensure_server_binary():
+    binary_path = shutil.which("eval-hub-server")
+    if not binary_path:
         pytest.skip(
             "eval-hub-server binary not available. "
-            "Build it locally or install from a release with binaries."
+            "Install it with: pip install 'eval-hub-sdk[server]'"
         )
+    assert binary_path is not None  # narrow type for mypy
 
     # Check that config directory exists
     config_source_dir = Path(__file__).parent / "config"
@@ -125,11 +129,6 @@ def evalhub_server_with_real_config() -> Generator[str, None, None]:
             )
             # Give the OS a moment to release the port
             time.sleep(0.5)
-
-        # Get the server binary path and start it directly as a subprocess
-        from evalhub_server import get_binary_path
-
-        binary_path = get_binary_path()
 
         with open(log_file, "w") as log_f:
             server_process = subprocess.Popen(

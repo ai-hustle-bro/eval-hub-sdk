@@ -12,12 +12,17 @@ import pytest
 import yaml
 from click.testing import CliRunner
 from evalhub.cli.main import main
+from evalhub.client.job_logs import JobLogUpdate
 from evalhub.models.api import (
     BenchmarkReference,
     Collection,
+    CollectionRef,
+    JobStatus,
     PassCriteria,
     Resource,
 )
+
+pytestmark = pytest.mark.unit
 
 
 def _make_benchmark_ref(
@@ -444,6 +449,243 @@ class TestCollectionsCreate:
 
 
 # ---------------------------------------------------------------------------
+# collections update
+# ---------------------------------------------------------------------------
+
+
+class TestCollectionsUpdate:
+    def test_update_from_yaml(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        spec = {
+            "name": "Updated Collection",
+            "description": "Updated via CLI",
+            "category": "leaderboard",
+            "benchmarks": [
+                {"benchmark_id": "mmlu", "provider_id": "lm_evaluation_harness"}
+            ],
+        }
+        spec_file = tmp_path / "collection.yaml"
+        spec_file.write_text(yaml.dump(spec))
+
+        updated = _make_collection(id="rag-safety", name="Updated Collection")
+        mock_client.collections.update.return_value = updated
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                ["collections", "update", "rag-safety", "--file", str(spec_file)],
+            )
+        assert result.exit_code == 0
+        assert "updated" in result.output.lower()
+        mock_client.collections.update.assert_called_once()
+        call_args = mock_client.collections.update.call_args
+        assert call_args[0][0] == "rag-safety"
+
+    def test_update_from_json(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        spec = {
+            "name": "JSON Updated",
+            "category": "leaderboard",
+            "benchmarks": [],
+        }
+        spec_file = tmp_path / "collection.json"
+        spec_file.write_text(json.dumps(spec))
+
+        updated = _make_collection(id="rag-safety", name="JSON Updated")
+        mock_client.collections.update.return_value = updated
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                ["collections", "update", "rag-safety", "--file", str(spec_file)],
+            )
+        assert result.exit_code == 0
+        assert "rag-safety" in result.output
+
+    def test_update_json_output(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        spec = {"name": "My Collection", "category": "leaderboard", "benchmarks": []}
+        spec_file = tmp_path / "collection.yaml"
+        spec_file.write_text(yaml.dump(spec))
+
+        updated = _make_collection(id="my-col", name="My Collection")
+        mock_client.collections.update.return_value = updated
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "collections",
+                    "update",
+                    "my-col",
+                    "--file",
+                    str(spec_file),
+                    "--format",
+                    "json",
+                ],
+            )
+        assert result.exit_code == 0
+        json_start = result.output.index("[")
+        parsed = json.loads(result.output[json_start:])
+        assert parsed[0]["name"] == "My Collection"
+
+    def test_update_missing_file(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "collections",
+                    "update",
+                    "rag-safety",
+                    "--file",
+                    "/nonexistent/path.yaml",
+                ],
+            )
+        assert result.exit_code != 0
+        mock_client.collections.update.assert_not_called()
+
+    def test_update_invalid_spec(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        spec: dict = {"benchmarks": []}
+        spec_file = tmp_path / "bad.yaml"
+        spec_file.write_text(yaml.dump(spec))
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                ["collections", "update", "rag-safety", "--file", str(spec_file)],
+            )
+        assert result.exit_code != 0
+        mock_client.collections.update.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# collections patch
+# ---------------------------------------------------------------------------
+
+
+class TestCollectionsPatch:
+    def test_patch_from_yaml(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        spec = {"description": "Patched description"}
+        spec_file = tmp_path / "patch.yaml"
+        spec_file.write_text(yaml.dump(spec))
+
+        patched = _make_collection(id="rag-safety", description="Patched description")
+        mock_client.collections.patch.return_value = patched
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                ["collections", "patch", "rag-safety", "--file", str(spec_file)],
+            )
+        assert result.exit_code == 0
+        assert "patched" in result.output.lower()
+        mock_client.collections.patch.assert_called_once()
+        call_args = mock_client.collections.patch.call_args
+        assert call_args[0][0] == "rag-safety"
+        assert call_args[0][1] == {"description": "Patched description"}
+
+    def test_patch_from_json(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        spec = {"tags": ["updated", "safety"]}
+        spec_file = tmp_path / "patch.json"
+        spec_file.write_text(json.dumps(spec))
+
+        patched = _make_collection(id="rag-safety", tags=["updated", "safety"])
+        mock_client.collections.patch.return_value = patched
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                ["collections", "patch", "rag-safety", "--file", str(spec_file)],
+            )
+        assert result.exit_code == 0
+        assert "rag-safety" in result.output
+
+    def test_patch_json_output(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        spec = {"name": "Patched Name"}
+        spec_file = tmp_path / "patch.yaml"
+        spec_file.write_text(yaml.dump(spec))
+
+        patched = _make_collection(id="my-col", name="Patched Name")
+        mock_client.collections.patch.return_value = patched
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "collections",
+                    "patch",
+                    "my-col",
+                    "--file",
+                    str(spec_file),
+                    "--format",
+                    "json",
+                ],
+            )
+        assert result.exit_code == 0
+        json_start = result.output.index("[")
+        parsed = json.loads(result.output[json_start:])
+        assert parsed[0]["name"] == "Patched Name"
+
+    def test_patch_missing_file(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "collections",
+                    "patch",
+                    "rag-safety",
+                    "--file",
+                    "/nonexistent/path.yaml",
+                ],
+            )
+        assert result.exit_code != 0
+        mock_client.collections.patch.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # collections delete
 # ---------------------------------------------------------------------------
 
@@ -520,6 +762,9 @@ class TestCollectionsRun:
         assert result.exit_code == 0
         assert "job-abc" in result.output
         mock_client.jobs.submit.assert_called_once()
+        submitted = mock_client.jobs.submit.call_args[0][0]
+        assert submitted.collection == CollectionRef(id="rag-safety")
+        assert submitted.benchmarks is None
 
     def test_run_custom_job_name(
         self, runner: CliRunner, config_file: Path, mock_client: MagicMock
@@ -553,6 +798,40 @@ class TestCollectionsRun:
         assert result.exit_code == 0
         submitted = mock_client.jobs.submit.call_args[0][0]
         assert submitted.name == "my-custom-run"
+
+    def test_run_with_model_auth_secret(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        collection = _make_collection(
+            id="rag-safety",
+            benchmarks=[_make_benchmark_ref()],
+        )
+        mock_client.collections.get.return_value = collection
+
+        job = MagicMock()
+        job.id = "job-xyz"
+        job.state.value = "running"
+        mock_client.jobs.submit.return_value = job
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "collections",
+                    "run",
+                    "rag-safety",
+                    "--model-url",
+                    "http://vllm:8000/v1",
+                    "--model-name",
+                    "llama3",
+                    "--model-auth-secret",
+                    "my-model-credentials",
+                ],
+            )
+        assert result.exit_code == 0
+        submitted = mock_client.jobs.submit.call_args[0][0]
+        assert submitted.model.auth is not None
+        assert submitted.model.auth.secret_ref == "my-model-credentials"
 
     def test_run_empty_collection_errors(
         self, runner: CliRunner, config_file: Path, mock_client: MagicMock
@@ -686,6 +965,42 @@ class TestCollectionsRun:
         req = mock_client.jobs.submit.call_args[0][0]
         assert req.queue is None
 
+    def test_run_with_watch(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        collection = _make_collection(
+            id="rag-safety",
+            benchmarks=[_make_benchmark_ref()],
+        )
+        mock_client.collections.get.return_value = collection
+
+        job = MagicMock()
+        job.id = "job-abc"
+        mock_client.jobs.submit.return_value = job
+        completed = MagicMock()
+        completed.effective_state = JobStatus.COMPLETED
+        mock_client.jobs.watch_logs.return_value = iter(
+            [JobLogUpdate(logs="log line\n", job=completed)]
+        )
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "collections",
+                    "run",
+                    "rag-safety",
+                    "--model-url",
+                    "http://vllm:8000/v1",
+                    "--model-name",
+                    "llama3",
+                    "--watch",
+                ],
+            )
+        assert result.exit_code == 0
+        assert "log line" in result.output
+        mock_client.jobs.watch_logs.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # Help
@@ -699,6 +1014,8 @@ class TestCollectionsHelp:
         assert "list" in result.output
         assert "describe" in result.output
         assert "create" in result.output
+        assert "update" in result.output
+        assert "patch" in result.output
         assert "delete" in result.output
         assert "run" in result.output
 
@@ -713,4 +1030,6 @@ class TestCollectionsHelp:
         assert result.exit_code == 0
         assert "--model-url" in result.output
         assert "--model-name" in result.output
+        assert "--model-auth-secret" in result.output
         assert "--wait" in result.output
+        assert "--watch" in result.output

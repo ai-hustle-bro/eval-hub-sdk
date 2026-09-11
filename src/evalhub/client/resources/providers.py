@@ -16,10 +16,18 @@ class AsyncProvidersResource:
     def __init__(self, client: BaseAsyncClient):
         self._client = client
 
-    async def list(self, *, tenant: str | None = None) -> list[Provider]:
+    async def list(
+        self,
+        *,
+        target_type: str | None = None,
+        evaluates: str | None = None,
+        tenant: str | None = None,
+    ) -> list[Provider]:
         """List all registered providers.
 
         Args:
+            target_type: Filter by agent target type (e.g. "model", "agent", "inference_server")
+            evaluates: Filter to providers whose agent evaluates this capability
             tenant: Tenant override for this request (default: client-level tenant)
 
         Returns:
@@ -33,7 +41,12 @@ class AsyncProvidersResource:
         )
         data = response.json()
         provider_list = ProviderList(**data)
-        return provider_list.items
+        items = provider_list.items
+        if target_type:
+            items = [p for p in items if p.agent and p.agent.target_type == target_type]
+        if evaluates:
+            items = [p for p in items if p.agent and evaluates in p.agent.evaluates]
+        return items
 
     async def get(self, provider_id: str, *, tenant: str | None = None) -> Provider:
         """Get information about a specific provider.
@@ -71,6 +84,48 @@ class AsyncProvidersResource:
         )
         return Provider(**response.json())
 
+    async def update(
+        self, provider_id: str, data: dict, *, tenant: str | None = None
+    ) -> Provider:
+        """Replace an evaluation provider (full update).
+
+        Args:
+            provider_id: The provider identifier
+            data: Full provider specification as a dict
+            tenant: Tenant override for this request (default: client-level tenant)
+
+        Returns:
+            Provider: The updated provider
+
+        Raises:
+            httpx.HTTPError: If the request fails
+        """
+        response = await self._client._request_put(
+            f"/evaluations/providers/{provider_id}", json=data, tenant=tenant
+        )
+        return Provider(**response.json())
+
+    async def patch(
+        self, provider_id: str, data: dict, *, tenant: str | None = None
+    ) -> Provider:
+        """Partially update an evaluation provider.
+
+        Args:
+            provider_id: The provider identifier
+            data: Partial provider data to merge
+            tenant: Tenant override for this request (default: client-level tenant)
+
+        Returns:
+            Provider: The updated provider
+
+        Raises:
+            httpx.HTTPError: If the request fails
+        """
+        response = await self._client._request_patch(
+            f"/evaluations/providers/{provider_id}", json=data, tenant=tenant
+        )
+        return Provider(**response.json())
+
     async def delete(self, provider_id: str, *, tenant: str | None = None) -> None:
         """Delete an evaluation provider.
 
@@ -92,10 +147,18 @@ class SyncProvidersResource:
     def __init__(self, client: BaseSyncClient):
         self._client = client
 
-    def list(self, *, tenant: str | None = None) -> list[Provider]:
+    def list(
+        self,
+        *,
+        target_type: str | None = None,
+        evaluates: str | None = None,
+        tenant: str | None = None,
+    ) -> list[Provider]:
         """List all registered providers.
 
         Args:
+            target_type: Filter by agent target type (e.g. "model", "agent", "inference_server")
+            evaluates: Filter to providers whose agent evaluates this capability
             tenant: Tenant override for this request (default: client-level tenant)
 
         Returns:
@@ -107,7 +170,12 @@ class SyncProvidersResource:
         response = self._client._request_get("/evaluations/providers", tenant=tenant)
         data = response.json()
         provider_list = ProviderList(**data)
-        return provider_list.items
+        items = provider_list.items
+        if target_type:
+            items = [p for p in items if p.agent and p.agent.target_type == target_type]
+        if evaluates:
+            items = [p for p in items if p.agent and evaluates in p.agent.evaluates]
+        return items
 
     def get(self, provider_id: str, *, tenant: str | None = None) -> Provider:
         """Get information about a specific provider.
@@ -142,6 +210,48 @@ class SyncProvidersResource:
         """
         response = self._client._request_post(
             "/evaluations/providers", json=data, tenant=tenant
+        )
+        return Provider(**response.json())
+
+    def update(
+        self, provider_id: str, data: dict, *, tenant: str | None = None
+    ) -> Provider:
+        """Replace an evaluation provider (full update).
+
+        Args:
+            provider_id: The provider identifier
+            data: Full provider specification as a dict
+            tenant: Tenant override for this request (default: client-level tenant)
+
+        Returns:
+            Provider: The updated provider
+
+        Raises:
+            httpx.HTTPError: If the request fails
+        """
+        response = self._client._request_put(
+            f"/evaluations/providers/{provider_id}", json=data, tenant=tenant
+        )
+        return Provider(**response.json())
+
+    def patch(
+        self, provider_id: str, data: dict, *, tenant: str | None = None
+    ) -> Provider:
+        """Partially update an evaluation provider.
+
+        Args:
+            provider_id: The provider identifier
+            data: Partial provider data to merge
+            tenant: Tenant override for this request (default: client-level tenant)
+
+        Returns:
+            Provider: The updated provider
+
+        Raises:
+            httpx.HTTPError: If the request fails
+        """
+        response = self._client._request_patch(
+            f"/evaluations/providers/{provider_id}", json=data, tenant=tenant
         )
         return Provider(**response.json())
 

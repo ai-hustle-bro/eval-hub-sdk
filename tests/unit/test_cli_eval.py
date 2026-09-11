@@ -13,6 +13,7 @@ import pytest
 import yaml
 from click.testing import CliRunner
 from evalhub.cli.main import main
+from evalhub.client.job_logs import JobLogOptions, JobLogUpdate
 from evalhub.models.api import (
     BenchmarkConfig,
     BenchmarkResult,
@@ -24,6 +25,8 @@ from evalhub.models.api import (
     JobStatus,
     ModelConfig,
 )
+
+pytestmark = pytest.mark.unit
 
 NOW = datetime(2026, 3, 23, 12, 0, 0, tzinfo=UTC)
 
@@ -179,6 +182,35 @@ class TestEvalRun:
         assert req.experiment.name == "test_exp"
         assert req.experiment.tags == []
 
+    def test_run_with_model_auth_secret(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        mock_client.jobs.submit.return_value = _make_job()
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "eval",
+                    "run",
+                    "--name",
+                    "inline-eval",
+                    "--model-url",
+                    "http://vllm:8000/v1",
+                    "--model-name",
+                    "llama3",
+                    "--model-auth-secret",
+                    "my-model-credentials",
+                    "--provider",
+                    "lm_eval",
+                    "-b",
+                    "mmlu",
+                ],
+            )
+        assert result.exit_code == 0
+        req = mock_client.jobs.submit.call_args[0][0]
+        assert req.model.auth is not None
+        assert req.model.auth.secret_ref == "my-model-credentials"
+
     def test_run_with_inline_oci(
         self, runner: CliRunner, config_file: Path, mock_client: MagicMock
     ) -> None:
@@ -326,6 +358,113 @@ class TestEvalRun:
                 ],
             )
         assert result.exit_code == 1
+
+    def test_run_with_watch(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        cfg = {
+            "name": "my-eval",
+            "model": {"url": "http://vllm:8000/v1", "name": "llama3"},
+            "benchmarks": [{"id": "mmlu", "provider_id": "lm_eval"}],
+        }
+        cfg_path = tmp_path / "eval.yaml"
+        cfg_path.write_text(yaml.safe_dump(cfg))
+
+        submitted = _make_job()
+        completed = _make_job(state=JobStatus.COMPLETED)
+        mock_client.jobs.submit.return_value = submitted
+        mock_client.jobs.watch_logs.return_value = iter(
+            [
+                JobLogUpdate(logs="starting\n", job=_make_job(state=JobStatus.RUNNING)),
+                JobLogUpdate(logs="done\n", job=completed),
+            ]
+        )
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "eval",
+                    "run",
+                    "--config",
+                    str(cfg_path),
+                    "--watch",
+                ],
+            )
+        assert result.exit_code == 0
+        assert "starting" in result.output
+        assert "done" in result.output
+        assert "finished with state: completed" in result.output
+        mock_client.jobs.watch_logs.assert_called_once()
+
+    def test_run_with_watch_failed(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        cfg = {
+            "name": "my-eval",
+            "model": {"url": "http://vllm:8000/v1", "name": "llama3"},
+            "benchmarks": [{"id": "mmlu", "provider_id": "lm_eval"}],
+        }
+        cfg_path = tmp_path / "eval.yaml"
+        cfg_path.write_text(yaml.safe_dump(cfg))
+
+        submitted = _make_job()
+        failed = _make_job(state=JobStatus.FAILED)
+        mock_client.jobs.submit.return_value = submitted
+        mock_client.jobs.watch_logs.return_value = iter(
+            [JobLogUpdate(logs="error\n", job=failed)]
+        )
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "eval",
+                    "run",
+                    "--config",
+                    str(cfg_path),
+                    "--watch",
+                ],
+            )
+        assert result.exit_code == 1
+
+    def test_run_with_wait_and_watch_mutually_exclusive(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        cfg = {
+            "name": "my-eval",
+            "model": {"url": "http://vllm:8000/v1", "name": "llama3"},
+            "benchmarks": [{"id": "mmlu", "provider_id": "lm_eval"}],
+        }
+        cfg_path = tmp_path / "eval.yaml"
+        cfg_path.write_text(yaml.safe_dump(cfg))
+
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "eval",
+                    "run",
+                    "--config",
+                    str(cfg_path),
+                    "--wait",
+                    "--watch",
+                ],
+            )
+        assert result.exit_code != 0
+        assert "mutually exclusive" in result.output.lower()
 
     def test_run_with_param_flags(
         self, runner: CliRunner, config_file: Path, mock_client: MagicMock
@@ -627,6 +766,139 @@ class TestEvalRun:
         assert req.queue is not None
         assert req.queue.name == "user-queue"
 
+    def test_run_with_pvc_claim_name(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        mock_client.jobs.submit.return_value = _make_job()
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "eval",
+                    "run",
+                    "--name",
+                    "pvc-eval",
+                    "--model-url",
+                    "http://vllm:8000/v1",
+                    "--model-name",
+                    "llama3",
+                    "--provider",
+                    "lm_eval",
+                    "-b",
+                    "mmlu",
+                    "--test-data-pvc-claim-name",
+                    "my-datasets-pvc",
+                ],
+            )
+        assert result.exit_code == 0
+        req = mock_client.jobs.submit.call_args[0][0]
+        assert req.benchmarks[0].test_data_ref is not None
+        assert req.benchmarks[0].test_data_ref.pvc is not None
+        assert req.benchmarks[0].test_data_ref.pvc.claim_name == "my-datasets-pvc"
+        assert req.benchmarks[0].test_data_ref.pvc.sub_path is None
+        assert req.benchmarks[0].test_data_ref.s3 is None
+
+    def test_run_with_pvc_claim_name_and_sub_path(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        mock_client.jobs.submit.return_value = _make_job()
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "eval",
+                    "run",
+                    "--name",
+                    "pvc-eval",
+                    "--model-url",
+                    "http://vllm:8000/v1",
+                    "--model-name",
+                    "llama3",
+                    "--provider",
+                    "lm_eval",
+                    "-b",
+                    "mmlu",
+                    "--test-data-pvc-claim-name",
+                    "my-datasets-pvc",
+                    "--test-data-pvc-sub-path",
+                    "staging",
+                ],
+            )
+        assert result.exit_code == 0
+        req = mock_client.jobs.submit.call_args[0][0]
+        pvc = req.benchmarks[0].test_data_ref.pvc
+        assert pvc.claim_name == "my-datasets-pvc"
+        assert pvc.sub_path == "staging"
+
+    def test_run_pvc_and_s3_mutually_exclusive(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        mock_client.jobs.submit.return_value = _make_job()
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "eval",
+                    "run",
+                    "--name",
+                    "pvc-eval",
+                    "--model-url",
+                    "http://vllm:8000/v1",
+                    "--model-name",
+                    "llama3",
+                    "--provider",
+                    "lm_eval",
+                    "-b",
+                    "mmlu",
+                    "--test-data-pvc-claim-name",
+                    "my-datasets-pvc",
+                    "--test-data-s3-bucket",
+                    "my-bucket",
+                    "--test-data-s3-key",
+                    "data/",
+                    "--test-data-s3-secret",
+                    "my-secret",
+                ],
+            )
+        assert result.exit_code != 0
+        assert "Cannot specify more than one test data source" in result.output
+
+    def test_run_pvc_sub_path_requires_claim_name(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                [
+                    "eval",
+                    "run",
+                    "--name",
+                    "pvc-eval",
+                    "--model-url",
+                    "http://vllm:8000/v1",
+                    "--model-name",
+                    "llama3",
+                    "--provider",
+                    "lm_eval",
+                    "-b",
+                    "mmlu",
+                    "--test-data-pvc-sub-path",
+                    "staging",
+                ],
+            )
+        assert result.exit_code != 0
+        assert (
+            "--test-data-pvc-sub-path requires --test-data-pvc-claim-name"
+            in result.output
+        )
+        mock_client.jobs.submit.assert_not_called()
+
+    def test_eval_run_help_pvc_flags(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["eval", "run", "--help"])
+        assert result.exit_code == 0
+        assert "--test-data-pvc-claim-name" in result.output
+        assert "--test-data-pvc-sub-path" in result.output
+
 
 # --- eval status ---
 
@@ -687,6 +959,27 @@ class TestEvalStatus:
         assert "eval-123" in result.output
         assert "running" in result.output
         assert "llama3" in result.output
+
+    def test_single_job_detail_with_phase(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        from evalhub.models.api import JobPhase
+
+        mock_client.jobs.get.return_value = _make_job(
+            state=JobStatus.RUNNING,
+            benchmark_statuses=[
+                BenchmarkStatus(
+                    id="mmlu",
+                    provider_id="lm_eval",
+                    status=JobStatus.RUNNING,
+                    phase=JobPhase.RUNNING_EVALUATION,
+                ),
+            ],
+        )
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(main, ["eval", "status", "eval-123"])
+        assert result.exit_code == 0
+        assert "running_evaluation" in result.output
 
     def test_single_job_json(
         self, runner: CliRunner, config_file: Path, mock_client: MagicMock
@@ -850,6 +1143,180 @@ class TestEvalResults:
         assert "hellaswag" in result.output
 
 
+# --- eval logs ---
+
+
+class TestEvalLogs:
+    def test_logs_snapshot(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        mock_client.jobs.get_logs.return_value = "line1\nline2\n"
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(main, ["eval", "logs", "eval-123"])
+        assert result.exit_code == 0
+        assert "line1" in result.output
+        assert "line2" in result.output
+        mock_client.jobs.get_logs.assert_called_once_with(
+            "eval-123",
+            benchmark_index=None,
+            options=JobLogOptions(tail_lines=1000, timestamps=False),
+        )
+
+    def test_logs_with_tail(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        mock_client.jobs.get_logs.return_value = "tail output\n"
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(main, ["eval", "logs", "eval-123", "--tail", "50"])
+        assert result.exit_code == 0
+        mock_client.jobs.get_logs.assert_called_once_with(
+            "eval-123",
+            benchmark_index=None,
+            options=JobLogOptions(tail_lines=50, timestamps=False),
+        )
+
+    def test_logs_with_timestamps(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        mock_client.jobs.get_logs.return_value = "2026-01-01T00:00:00Z line\n"
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(main, ["eval", "logs", "eval-123", "--timestamps"])
+        assert result.exit_code == 0
+        mock_client.jobs.get_logs.assert_called_once_with(
+            "eval-123",
+            benchmark_index=None,
+            options=JobLogOptions(tail_lines=1000, timestamps=True),
+        )
+
+    def test_logs_with_since(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        mock_client.jobs.get_logs.return_value = "recent log\n"
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(main, ["eval", "logs", "eval-123", "--since", "300"])
+        assert result.exit_code == 0
+        mock_client.jobs.get_logs.assert_called_once_with(
+            "eval-123",
+            benchmark_index=None,
+            options=JobLogOptions(tail_lines=1000, timestamps=False, since_seconds=300),
+        )
+
+    def test_logs_with_benchmark_index(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        mock_client.jobs.get_logs.return_value = "benchmark 0 logs\n"
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main, ["eval", "logs", "eval-123", "--benchmark-index", "0"]
+            )
+        assert result.exit_code == 0
+        mock_client.jobs.get_logs.assert_called_once_with(
+            "eval-123",
+            benchmark_index=0,
+            options=JobLogOptions(tail_lines=1000, timestamps=False),
+        )
+
+    def test_logs_follow(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        completed = _make_job(state=JobStatus.COMPLETED)
+        mock_client.jobs.watch_logs.return_value = iter(
+            [
+                JobLogUpdate(logs="starting\n", job=_make_job(state=JobStatus.RUNNING)),
+                JobLogUpdate(logs="done\n", job=completed),
+            ]
+        )
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(main, ["eval", "logs", "eval-123", "--follow"])
+        assert result.exit_code == 0
+        assert "starting" in result.output
+        assert "done" in result.output
+        assert "finished with state: completed" in result.output
+        mock_client.jobs.watch_logs.assert_called_once_with(
+            "eval-123",
+            benchmark_index=None,
+            options=JobLogOptions(tail_lines=1000, timestamps=False),
+            poll_interval=2.0,
+            timeout=None,
+        )
+
+    def test_logs_follow_timeout(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        mock_client.jobs.watch_logs.side_effect = TimeoutError
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                ["eval", "logs", "eval-123", "--follow", "--timeout", "10"],
+            )
+        assert result.exit_code == 2
+        assert "Timed out" in result.output
+        mock_client.jobs.watch_logs.assert_called_once_with(
+            "eval-123",
+            benchmark_index=None,
+            options=JobLogOptions(tail_lines=1000, timestamps=False),
+            poll_interval=2.0,
+            timeout=10.0,
+        )
+
+    def test_logs_empty(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        mock_client.jobs.get_logs.return_value = ""
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(main, ["eval", "logs", "eval-123"])
+        assert result.exit_code == 0
+        assert result.output == ""
+
+    def test_logs_timeout_without_follow_errors(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main, ["eval", "logs", "eval-123", "--timeout", "30"]
+            )
+        assert result.exit_code != 0
+        assert "--timeout requires --follow" in result.output
+
+    @pytest.mark.parametrize(
+        "option,value",
+        [
+            ("--poll-interval", "nan"),
+            ("--poll-interval", "inf"),
+            ("--timeout", "nan"),
+            ("--timeout", "inf"),
+        ],
+    )
+    def test_logs_rejects_non_finite_floats(
+        self,
+        runner: CliRunner,
+        config_file: Path,
+        mock_client: MagicMock,
+        option: str,
+        value: str,
+    ) -> None:
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(
+                main,
+                ["eval", "logs", "eval-123", "--follow", option, value],
+            )
+        assert result.exit_code != 0
+        assert "not a finite number" in result.output
+
+    def test_logs_follow_incomplete_stream(
+        self, runner: CliRunner, config_file: Path, mock_client: MagicMock
+    ) -> None:
+        mock_client.jobs.watch_logs.return_value = iter(
+            [
+                JobLogUpdate(logs="partial\n", job=_make_job(state=JobStatus.PENDING)),
+            ]
+        )
+        with patch("evalhub.cli.main.get_client", return_value=mock_client):
+            result = runner.invoke(main, ["eval", "logs", "eval-123", "--follow"])
+        assert result.exit_code == 2
+        assert "Stream ended before completion" in result.output
+
+
 # --- eval cancel ---
 
 
@@ -895,6 +1362,7 @@ class TestEvalHelp:
         assert "run" in result.output
         assert "status" in result.output
         assert "results" in result.output
+        assert "logs" in result.output
         assert "cancel" in result.output
 
     def test_eval_run_help(self, runner: CliRunner) -> None:
@@ -902,13 +1370,24 @@ class TestEvalHelp:
         assert result.exit_code == 0
         assert "--config" in result.output
         assert "--model-url" in result.output
+        assert "--model-auth-secret" in result.output
         assert "--wait" in result.output
+        assert "--watch" in result.output
 
     def test_eval_status_help(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["eval", "status", "--help"])
         assert result.exit_code == 0
         assert "--status" in result.output
         assert "--watch" in result.output
+
+    def test_eval_logs_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(main, ["eval", "logs", "--help"])
+        assert result.exit_code == 0
+        assert "--follow" in result.output
+        assert "--tail" in result.output
+        assert "--timestamps" in result.output
+        assert "--since" in result.output
+        assert "--benchmark-index" in result.output
 
     def test_eval_results_help(self, runner: CliRunner) -> None:
         result = runner.invoke(main, ["eval", "results", "--help"])

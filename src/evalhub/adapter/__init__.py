@@ -14,7 +14,11 @@ Quick Start:
         JobStatus,
         JobPhase,
         JobStatusUpdate,
+        configure_telemetry,
     )
+
+    # Enable OTEL span export (no-op when OTEL env vars are absent)
+    configure_telemetry()
 
     class MyAdapter(FrameworkAdapter):
         def run_benchmark_job(
@@ -97,12 +101,14 @@ from .models import (
     JobSpec,
     JobStatusUpdate,
     MessageInfo,
+    MessageOrigin,
     OCIArtifactResult,
     OCIArtifactSpec,
     SafetyEvalEntry,
 )
 from .oci import OCIArtifactPersister
 from .settings import AdapterSettings
+from .telemetry import EvalTracer, configure_telemetry
 
 # Legacy API is available but deprecated
 # from evalhub.adapter.legacy import ...
@@ -123,6 +129,7 @@ __all__ = [
     "JobPhase",
     "ErrorInfo",
     "MessageInfo",
+    "MessageOrigin",
     # OCI models
     "OCIArtifactSpec",
     "OCIArtifactResult",
@@ -144,6 +151,9 @@ __all__ = [
     "collect_live_responses_from_parameters",
     "collect_openai_chat_completions",
     "load_live_questions",
+    # Telemetry
+    "EvalTracer",
+    "configure_telemetry",
     # Common models (re-exported for convenience)
     "JobStatus",
     "ModelConfig",
